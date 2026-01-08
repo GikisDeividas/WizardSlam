@@ -1,201 +1,80 @@
-const WebSocket = require('ws');
 const http = require('http');
-const net = require('net');
 
-// Configuration
 const PORT = process.env.PORT || 8080;
-const TCP_PORT = process.env.TCP_PORT || 6789;
 
-// Room storage
+// Rooms: { code: { messages: { host: [], client: [] }, hasClient: bool, lastPing: timestamp } }
 const rooms = new Map();
 
-// Generate a random 4-digit room code
-function generateRoomCode() {
+function generateCode() {
     let code;
-    do {
-        code = Math.floor(1000 + Math.random() * 9000).toString();
-    } while (rooms.has(code));
+    do { code = String(Math.floor(1000 + Math.random() * 9000)); } while (rooms.has(code));
     return code;
 }
 
-// ======================
-// HTTP Server for health checks and REST API
-// ======================
-const server = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+function json(res, data, status = 200) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(data));
+}
 
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-    }
+http.createServer((req, res) => {
+    if (req.method === 'OPTIONS') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' }); res.end(); return; }
 
     const url = new URL(req.url, `http://${req.headers.host}`);
+    const p = url.pathname;
+    const q = (k) => url.searchParams.get(k);
 
-    if (url.pathname === '/health' || url.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, mode: 'websocket' }));
+    // Health
+    if (p === '/') { json(res, { ok: true, rooms: rooms.size }); return; }
+
+    // Host creates room
+    if (p === '/host') {
+        const code = generateCode();
+        rooms.set(code, { messages: { host: [], client: [] }, hasClient: false, lastPing: Date.now() });
+        console.log('Room:', code);
+        json(res, { code });
         return;
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Use WebSocket connection for game relay' }));
-});
-
-// ======================
-// WebSocket Server for game relay
-// ======================
-const wss = new WebSocket.Server({ server });
-
-function broadcast(room, message, excludeSocket) {
-    const clients = [room.hostWS, room.clientWS].filter(ws => ws && ws !== excludeSocket && ws.readyState === WebSocket.OPEN);
-    clients.forEach(ws => {
-        ws.send(JSON.stringify(message));
-    });
-}
-
-wss.on('connection', (ws) => {
-    console.log('WebSocket connected');
-
-    ws.roomCode = null;
-    ws.isHost = false;
-    ws.isAlive = true;
-
-    ws.on('pong', () => { ws.isAlive = true; });
-
-    ws.on('message', (data) => {
-        try {
-            const msg = JSON.parse(data.toString());
-
-            switch (msg.type) {
-                case 'CREATE_ROOM': {
-                    const code = generateRoomCode();
-                    rooms.set(code, {
-                        hostWS: ws,
-                        clientWS: null,
-                        created: Date.now()
-                    });
-                    ws.roomCode = code;
-                    ws.isHost = true;
-                    ws.send(JSON.stringify({ type: 'ROOM_CREATED', code }));
-                    console.log(`Room created: ${code}`);
-                    break;
-                }
-
-                case 'JOIN_ROOM': {
-                    const room = rooms.get(msg.code);
-                    if (!room) {
-                        ws.send(JSON.stringify({ type: 'ERROR', message: 'Room not found' }));
-                        return;
-                    }
-                    if (room.clientWS) {
-                        ws.send(JSON.stringify({ type: 'ERROR', message: 'Room is full' }));
-                        return;
-                    }
-
-                    room.clientWS = ws;
-                    ws.roomCode = msg.code;
-                    ws.isHost = false;
-
-                    ws.send(JSON.stringify({ type: 'JOINED', code: msg.code }));
-                    if (room.hostWS && room.hostWS.readyState === WebSocket.OPEN) {
-                        room.hostWS.send(JSON.stringify({ type: 'PLAYER_JOINED' }));
-                    }
-                    console.log(`Player joined room: ${msg.code}`);
-                    break;
-                }
-
-                case 'RELAY': {
-                    // Forward game data to the other player
-                    const room = rooms.get(ws.roomCode);
-                    if (!room) return;
-
-                    const target = ws.isHost ? room.clientWS : room.hostWS;
-                    if (target && target.readyState === WebSocket.OPEN) {
-                        target.send(JSON.stringify({ type: 'RELAY', data: msg.data }));
-                    }
-                    break;
-                }
-
-                case 'LEAVE': {
-                    handleDisconnect(ws);
-                    break;
-                }
-            }
-        } catch (err) {
-            console.error('Message parse error:', err);
-        }
-    });
-
-    ws.on('close', () => {
-        handleDisconnect(ws);
-        console.log('WebSocket disconnected');
-    });
-
-    ws.on('error', (err) => {
-        console.error('WebSocket error:', err);
-    });
-});
-
-function handleDisconnect(ws) {
-    if (!ws.roomCode) return;
-
-    const room = rooms.get(ws.roomCode);
-    if (!room) return;
-
-    if (ws.isHost) {
-        // Host left - notify client and destroy room
-        if (room.clientWS && room.clientWS.readyState === WebSocket.OPEN) {
-            room.clientWS.send(JSON.stringify({ type: 'HOST_LEFT' }));
-            room.clientWS.roomCode = null;
-        }
-        rooms.delete(ws.roomCode);
-        console.log(`Room destroyed: ${ws.roomCode}`);
-    } else {
-        // Client left - notify host
-        if (room.hostWS && room.hostWS.readyState === WebSocket.OPEN) {
-            room.hostWS.send(JSON.stringify({ type: 'PLAYER_LEFT' }));
-        }
-        room.clientWS = null;
-        console.log(`Player left room: ${ws.roomCode}`);
+    // Client joins
+    if (p === '/join') {
+        const room = rooms.get(q('code'));
+        if (!room) { json(res, { error: 'not_found' }, 404); return; }
+        if (room.hasClient) { json(res, { error: 'full' }, 400); return; }
+        room.hasClient = true;
+        room.messages.host.push('JOINED');
+        json(res, { ok: true });
+        return;
     }
 
-    ws.roomCode = null;
-}
+    // Send message
+    if (p === '/send') {
+        const room = rooms.get(q('code'));
+        if (!room) { json(res, { error: 'not_found' }, 404); return; }
+        const target = q('role') === 'host' ? 'client' : 'host';
+        room.messages[target].push(q('msg'));
+        room.lastPing = Date.now();
+        json(res, { ok: true });
+        return;
+    }
 
-// Heartbeat to detect dead connections
-const heartbeat = setInterval(() => {
-    wss.clients.forEach(ws => {
-        if (!ws.isAlive) {
-            handleDisconnect(ws);
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 30000);
+    // Poll for messages
+    if (p === '/poll') {
+        const room = rooms.get(q('code'));
+        if (!room) { json(res, { error: 'not_found' }, 404); return; }
+        const role = q('role');
+        const msgs = room.messages[role].splice(0);
+        room.lastPing = Date.now();
+        json(res, { msgs, partner: role === 'host' ? room.hasClient : true });
+        return;
+    }
 
-// Cleanup old rooms
+    json(res, { error: 'not_found' }, 404);
+}).listen(PORT, () => console.log('🎮 Relay on', PORT));
+
+// Cleanup every 5 min
 setInterval(() => {
     const now = Date.now();
     for (const [code, room] of rooms) {
-        if (now - room.created > 2 * 60 * 60 * 1000) { // 2 hours
-            if (room.hostWS) room.hostWS.close();
-            if (room.clientWS) room.clientWS.close();
-            rooms.delete(code);
-            console.log(`Cleaned up old room: ${code}`);
-        }
+        if (now - room.lastPing > 600000) { rooms.delete(code); console.log('Cleaned:', code); }
     }
-}, 10 * 60 * 1000);
-
-wss.on('close', () => {
-    clearInterval(heartbeat);
-});
-
-server.listen(PORT, () => {
-    console.log(`🎮 Wizard Slam Relay Server`);
-    console.log(`   HTTP/WebSocket: port ${PORT}`);
-    console.log(`   URL: wss://wizard-slam-relay-production.up.railway.app`);
-});
+}, 300000);
