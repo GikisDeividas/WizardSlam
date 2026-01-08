@@ -20,11 +20,16 @@ http.createServer((req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' }); res.end(); return; }
 
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const p = url.pathname;
+    const p = url.pathname.replace(/\/$/, ""); // Trim trailing slash
     const q = (k) => url.searchParams.get(k);
 
-    // Health
-    if (p === '/') { json(res, { ok: true, rooms: rooms.size }); return; }
+    console.log(`[${new Date().toISOString().split('T')[1].split('.')[0]}] ${req.method} ${p} ${url.search}`);
+
+    // Health / Test
+    if (p === '' || p === '/' || p === '/test') {
+        json(res, { ok: true, rooms: rooms.size, time: Date.now() });
+        return;
+    }
 
     // Host creates room
     if (p === '/host') {
