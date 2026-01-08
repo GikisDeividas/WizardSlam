@@ -1,0 +1,17 @@
+{
+  "name": "wizard-slam-relay",
+  "version": "1.0.0",
+  "description": "Relay server for Wizard Slam multiplayer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["game", "multiplayer", "relay"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}
